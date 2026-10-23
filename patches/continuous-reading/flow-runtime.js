@@ -307,7 +307,56 @@
     });
   }
 
-  /* ---------------- 加载下一话 ---------------- */
+  /* ---------------- 阅读记录写入（兜底） ----------------
+     不依赖组件回调：直接把新话记进 localStorage 的 read 键。
+     详情页与目录都从这个键读已读进度，这样即使 React 侧
+     更新被跳过，退出阅读页后看到的进度也是对的。 */
+  function writeReadRecord(chapterId) {
+    try {
+      var c = S.api && S.api.chapters;
+      var cid = c && c.queryId;
+      if (!cid || !chapterId) { return; }
+      var raw = localStorage.getItem("read");
+      var hist = raw ? JSON.parse(raw) : {};
+      if (!hist[cid] || !(hist[cid] instanceof Array)) { hist[cid] = []; }
+      if (hist[cid].indexOf(chapterId) < 0) {
+        hist[cid] = hist[cid].concat([chapterId]);
+        localStorage.setItem("read", JSON.stringify(hist));
+      }
+    } catch (e) {}
+  }
+
+  /* ---------------- 同步 React 侧状态 ----------------
+     连续阅读只是往 DOM 里补内容，React 仍以为 "当前话" 是 URL 里那一话。
+     所以每接一话都要主动把三处信息同步过去：
+       1) 标题（顶部）—— 指向正在阅读的那一话
+       2) 阅读记录 readHistory —— 目录里的"已读"标记
+       3) seriesGroups —— 目录里的当前话高亮 / 高亮到哪一章
+     另外把进度写入 localStorage 的 read 键，详情页据此显示"继续阅读"。 */
+  function syncReact(payload, nx) {
+    var api = S.api;
+    if (!api) { return; }
+
+    /* 0) 兜底：先自己写一份 localStorage 记录 */
+    writeReadRecord(payload.id);
+
+    /* 1) 阅读记录：写入 localStorage + 通知组件更新 state */
+    if (typeof api.saveRead === "function") {
+      try { api.saveRead(payload.id); } catch (e) {}
+    }
+
+    /* 2) 目录高亮：把 subEpisode / currentChapterId / episode 指向新话 */
+    if (typeof api.setGroups === "function") {
+      try { api.setGroups(payload.id, nx && nx.sort); } catch (e) {}
+    }
+
+    /* 3) 标题：组件使用 readList.name，无法在不重载的情况下改 redux，
+          这里改为直接更新顶部标题节点，并把详情页返回参数记好 */
+    if (typeof api.setTitle === "function") {
+      try { api.setTitle(payload.name); } catch (e) {}
+    }
+  }
+
 
   function loadNext() {
     if (S.loading || S.done) { return; }
@@ -351,6 +400,7 @@
       setTip("");
 
       decodeAll(payload, imgs);
+      syncReact(payload, nx);
 
       if (S.api && typeof S.api.onInserted === "function") {
         try { S.api.onInserted(payload); } catch (e) {}
@@ -452,6 +502,11 @@
       S.api = o || null;
       S.flowHost = null;
       setTip("");
+    },
+    /* 供组件读回当前漫画 id（写入 read 记录时用） */
+    get queryId() {
+      var c = S.api && S.api.chapters;
+      return (c && c.queryId) || "";
     },
     onChapterChange: function () {
       S.loading = false;
